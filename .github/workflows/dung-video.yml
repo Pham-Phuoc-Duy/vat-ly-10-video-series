@@ -1,0 +1,107 @@
+name: Dựng video từ kịch bản
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "kich-ban*.md"
+      - "kich-ban/**.md"
+      - "hinh/**"
+      - "tools/**"
+      - ".github/workflows/dung-video.yml"
+  workflow_dispatch:
+    inputs:
+      kich_ban:
+        description: "Tên file kịch bản (vd: kich-ban-bai-1.md). Để trống = dựng tất cả"
+        required: false
+        default: ""
+
+permissions:
+  contents: write   # để đăng video lên mục Releases
+
+concurrency:
+  group: dung-video-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dung-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/requirements.txt
+
+      - name: Cài ffmpeg và phông chữ tiếng Việt
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-dejavu-core
+
+      - name: Cài thư viện Python
+        run: pip install -r tools/requirements.txt
+
+      - name: Chọn kịch bản cần dựng
+        id: chon
+        shell: bash
+        run: |
+          tat_ca() { ls kich-ban*.md kich-ban/*.md 2>/dev/null || true; }
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.kich_ban }}" ]; then
+              DS="${{ inputs.kich_ban }}"
+            else
+              DS="$(tat_ca)"
+            fi
+          else
+            DOI="$(git diff --name-only HEAD^ HEAD 2>/dev/null || tat_ca)"
+            if echo "$DOI" | grep -qE '^(tools/|\.github/)'; then
+              DS="$(tat_ca)"          # sửa robot -> dựng lại tất cả
+            else
+              DS=""
+              for f in $DOI; do
+                case "$f" in
+                  kich-ban*.md|kich-ban/*.md) [ -f "$f" ] && DS="$DS $f" ;;
+                  hinh/*) slug="$(echo "$f" | cut -d/ -f2)"
+                          for k in "$slug.md" "kich-ban/$slug.md"; do [ -f "$k" ] && DS="$DS $k"; done ;;
+                esac
+              done
+            fi
+          fi
+          DS="$(echo $DS | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+          echo "Sẽ dựng: ${DS:-(không có)}"
+          echo "ds=$DS" >> "$GITHUB_OUTPUT"
+
+      - name: Dựng video
+        if: steps.chon.outputs.ds != ''
+        run: python tools/dung_video.py ${{ steps.chon.outputs.ds }} --out out
+
+      - name: Lưu video (Artifacts)
+        if: steps.chon.outputs.ds != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ github.run_number }}
+          path: out/
+          retention-days: 30
+
+      - name: Đăng lên Releases (tải về dễ, kể cả trên điện thoại)
+        if: steps.chon.outputs.ds != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          for mp4 in out/*.mp4; do
+            slug="$(basename "$mp4" .mp4)"
+            tag="video-$slug"
+            title="$(grep -m1 '^tieu_de:' "$(ls kich-ban*.md kich-ban/*.md 2>/dev/null | grep "/\?$slug.md$" | head -1)" | cut -d: -f2- | xargs)"
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" --title "${title:-$slug}" \
+                --notes "Video dựng tự động từ \`$slug.md\`." --target "${{ github.sha }}"
+            fi
+            gh release upload "$tag" "$mp4" "out/$slug.srt" "out/$slug-bia.png" --clobber
+            echo "### ✅ $slug — https://github.com/${{ github.repository }}/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
+          done
