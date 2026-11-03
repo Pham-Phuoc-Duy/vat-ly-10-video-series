@@ -26,7 +26,7 @@ concurrency:
 jobs:
   dung-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,8 +40,11 @@ jobs:
 
       - name: Cài ffmpeg và phông chữ tiếng Việt
         run: |
+          # tắt bước cập nhật man-db (rất chậm trên máy GitHub)
+          echo "set man-db/auto-update false" | sudo debconf-communicate >/dev/null || true
+          sudo rm -f /var/lib/man-db/auto-update
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-noto-core fonts-dejavu-core
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core
 
       - name: Cài thư viện Python
         run: pip install -r tools/requirements.txt
